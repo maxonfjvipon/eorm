@@ -1,0 +1,8 @@
+[package]
+name = "eorm"
+version = "0.0.0"
+edition = "2024"
+description = "The EO memory model on real memory"
+publish = false
+
+[dependencies]
