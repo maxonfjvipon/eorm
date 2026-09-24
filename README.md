@@ -1,4 +1,4 @@
-# eomem — a prototype of the EO memory model
+# eorm — the EO memory model, in Rust
 
 A small Rust program that runs hand-written EO programs on real memory
 exactly the way `MEMORY.md` says, and measures whether the theory holds.
