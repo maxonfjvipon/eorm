@@ -83,7 +83,9 @@ Code is not in the object. The shape table, built once per program, says
 for each shape: which names are voids and at what offset, which bound
 attributes have a slot, where φ and λ are, and the code of every body.
 Reading `x.a` is: load the header, index the shape table by (shape, `a`),
-act on what it says. No names at run time, no hashing.
+act on what it says. No names at run time, no hashing. A site whose
+receiver has a singleton type knows the shape before the run and pays
+neither the load nor the index (§18).
 
 A void slot holds a value word, or a pointer to a **thunk**: a two-word
 object (header naming the code, one word for the environment). Forcing a
@@ -284,7 +286,7 @@ copied anyway. `point 3 4 > origin` is this shape.
 This is an optimization per body, decided from its syntax, never the
 default. As the default it would send every computation's temporaries to
 long-lived regions and free nothing: every `fibo` instance would end up in
-the root's region.
+the root's region. A type widens what the syntax can see (§18).
 
 It does not catch a body with an `if` or a strict `minus` in it, which is
 what a tree builder looks like. That matters once the eraser (P6) makes
@@ -365,8 +367,13 @@ parts are a handful of objects and copy depth stays flat, §9's copy is
 noise. If they are large and frequent, we learn where and why before
 building anything.
 
-Third, once §12 exists: how many bodies are constructor-shaped, and what
+Fifth, once §12 exists: how many bodies are constructor-shaped, and what
 share of stores they cover.
+
+Sixth, split the first two by whether the result's site carries a
+singleton type in the inference tables (§18). That is the share of the copy
+a type import removes, known before either is built. It is counted in eoc,
+where the tables are; this project has no types to split by.
 
 ## 16. What this replaces in eoc
 
@@ -394,3 +401,55 @@ share of stores they cover.
 - **The direct lane and §12.** A constructor body compiled to plain Rust
   values may skip the region entirely; where it hands an object to the
   machine, that object is born by §8 in the current frame.
+
+## 18. What a type is worth here
+
+eo-inference works out, for every object of a program, which formation it
+is a copy of, and what it answers as once the decorators in front of it are
+folded. It is a whole-program analysis: every filling of every void is in
+the tables, so what a void holds is a fact about the program, and an answer
+rooted at a void is a union of formations, never an open question. The
+tables are keyed on the locator the XMIR already carries, and section 7 of
+eoc's `COMPILER.md` says how they come in. This section says what they are
+worth once they have.
+
+**The model needs none of it.** Every rule above holds with nothing known
+about any object, and the objects the tables leave at ⊤ run the same paths
+as the rest. A type removes run-time steps at the sites it covers and never
+changes what is correct. Whatever a type licenses, eoc's differential suite
+must still pass with the licence withheld.
+
+**A shape is a type made physical.** One shape per formation, one locator
+per formation, one table. The formation an object is a copy of is its shape
+and fixes its layout; the name `Reduced` writes beside it is what the object
+answers as and fixes where a dispatch lands. A site with a singleton type
+knows the shape number at compile time, so the header load and the table
+index of §4 go, the slot offset is a constant, and the allocation is a
+constant bump.
+
+**Two kinds of result are immediates by type alone.** A literal, and the
+result of an atom whose annotation names a datum, `[] > plus /Q.number`.
+Those frames have no region and no copy, and the escape rate of §15 is zero
+for them before anything is measured. A decorator in front of a number is
+still an object: `[] > five` with `5 > @` answers as a number and is born
+as a `five`, so a folded name licenses nothing about the frame's result.
+Only the dataization that walks behind it ends in the immediate.
+
+**§12 widens.** The constructor rule reads a body's syntax and stops at any
+dispatch it cannot see through. Only an atom dataizes, so a body every
+dispatch of which resolves without passing an atom, on its own type or on
+every member of its union, only constructs, and is born at the destination.
+This is where a type buys the model the most: it turns the copy of §9 into
+no copy for bodies the syntax alone would send through it.
+
+**A union is a switch.** The tree of `fork` and `leaf` is one site with two
+shapes; a small union compiles to a compare per member, and a large one, or
+⊤, keeps the dynamic path of §4. ⊥ is in every set, so every compiled
+shortcut keeps the branch that hands control back to the machine.
+
+**What a type says nothing about.** How long anything lives: that is the
+frame's business and nobody else's. Whether a thunk may be skipped: a
+datum-typed void still takes a thunk until the eraser (P6) proves the
+demand, and the type says only that one word will be left behind when it is
+forced. And the chain of §11 and the copy of §9 for everything the types do
+not reach.

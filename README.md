@@ -44,6 +44,13 @@ simulation** (a JS array has no cache lines, and the open questions are
 about cost), and **no parser** (a week that teaches nothing about
 memory).
 
+Out of scope too: `MEMORY.md` §18, what a type is worth. Every program
+here is a shape table its author wrote, so every shape is known in
+advance, which is the typed case. The machine must not use that: it reads
+the shape off the header and indexes the table, because the cost this
+project measures is the one the model pays with no type at hand. What a
+type removes is measured in eoc, against the inference tables.
+
 ## 3. The four questions
 
 Each is pass or fail. The project is done when each has a written answer
