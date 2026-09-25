@@ -4,3 +4,5 @@
 //! taken from the operating system, exactly the way `MEMORY.md` says,
 //! and counts what it costs.
 #![deny(clippy::pedantic, missing_docs)]
+
+pub mod pool;
