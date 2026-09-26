@@ -28,19 +28,22 @@ pub trait Pool {
 
 /// Blocks cut from chunks of system memory.
 ///
-/// A chunk is `count` blocks in a row, taken straight from `System` and
-/// aligned to 4 KB, followed by one link word:
+/// A chunk is `count` blocks in a row, taken straight from `System`,
+/// exactly `count * 4096` bytes and aligned to 4 KB. Block 0 is the
+/// chunk's header and is never handed out; its first word links to the
+/// chunk taken before it:
 ///
 /// ```text
-///   chunk ──► ┌─────────┬─────────┬─────────┬──────┐
-///             │ block 0 │ block 1 │ block 2 │ link │──► older chunk
-///             └─────────┴─────────┴─────────┴──────┘
+///   chunks ──► ┌────────┬─────────┬─────────┬─────────┐
+///              │ header │ block 1 │ block 2 │ block 3 │
+///              └───┬────┴─────────┴─────────┴─────────┘
+///                  └──► older chunk's header ──► ... ──► None
 /// ```
 ///
-/// The links chain every chunk ever taken, so `drop` can give them all
-/// back to `System`. A free block holds, in its first word, the address
-/// of the next free block, so the free list is threaded through the
-/// free blocks themselves:
+/// The headers chain every chunk ever taken, so `drop` can give them
+/// all back to `System`. A free block holds, in its first word, the
+/// address of the next free block, so the free list is threaded through
+/// the free blocks themselves:
 ///
 /// ```text
 ///   free ──► ┌──────┬───┐   ┌──────┬───┐   ┌──────┬───┐
@@ -49,15 +52,17 @@ pub trait Pool {
 /// ```
 ///
 /// Neither list needs memory of its own, so the pool never touches the
-/// global allocator. Every `unsafe` block here is sound for one reason:
-/// each address it reads or writes lies inside a live chunk, is aligned
-/// for a link word, and is either a free block, whose memory the pool
-/// owns until `pop` hands it out, or a chunk's link word, which nobody
-/// but the pool ever sees. A block is 4 KB aligned because the chunk is
-/// and blocks sit at multiples of 4 KB inside it; the link word sits at
-/// a multiple of 4 KB too, past the last block and inside the chunk's
-/// layout. Chunks are freed with the same layout they were taken with,
-/// once each, when the pool itself dies.
+/// global allocator, and the chunk layout is an exact multiple of 4 KB,
+/// so no byte of it spills into a page the pool cannot use. Every
+/// `unsafe` block here is sound for one reason: each address it reads
+/// or writes is the first word of a block inside a live chunk, which is
+/// aligned for a link word, and that block is either free, so the pool
+/// owns its memory until `pop` hands it out, or a header, which nobody
+/// but the pool ever sees. Every block is 4 KB aligned because the
+/// chunk is and blocks sit at multiples of 4 KB inside it; a chunk has
+/// at least two blocks, so block 1, the one `grow` hands out, lies
+/// inside it. Chunks are freed with the same layout they were taken
+/// with, once each, when the pool itself dies.
 pub struct Blocks {
     count: usize,
     free: Link,
@@ -65,7 +70,8 @@ pub struct Blocks {
 }
 
 impl Blocks {
-    /// A pool that takes `count` blocks at a time from the system.
+    /// A pool that takes `count` blocks at a time from the system, one
+    /// of them being the chunk's header.
     #[must_use]
     pub fn new(count: usize) -> Self {
         Self {
@@ -74,30 +80,29 @@ impl Blocks {
             chunks: None,
         }
     }
-    /// The layout of one chunk: `count` blocks and a link word, 4 KB aligned.
+    /// The layout of one chunk: `count` blocks, 4 KB aligned.
     fn layout(&self) -> Layout {
+        assert!(
+            self.count > 1,
+            "a chunk of {} blocks has no block besides its header",
+            self.count
+        );
         self.count
             .checked_mul(BLOCK)
-            .and_then(|size| size.checked_add(size_of::<Link>()))
             .and_then(|size| Layout::from_size_align(size, BLOCK).ok())
             .unwrap_or_else(|| panic!("a chunk of {} blocks does not fit in memory", self.count))
     }
-    /// The link word of a chunk, right past its last block.
-    ///
-    /// The chunk must be one this pool took from `System` and has not
-    /// freed yet, so the offset stays inside its allocation.
-    unsafe fn tail(&self, chunk: NonNull<u8>) -> NonNull<Link> {
-        unsafe { chunk.add(self.count * BLOCK) }.cast()
-    }
-    /// Takes one more chunk from `System` and pushes all of its blocks.
-    fn grow(&mut self) {
+    /// Takes one more chunk from `System`, pushes all of its blocks but
+    /// the header and the first one, and hands out the first one.
+    fn grow(&mut self) -> NonNull<u8> {
         let chunk = NonNull::new(unsafe { System.alloc(self.layout()) })
             .unwrap_or_else(|| handle_alloc_error(self.layout()));
-        unsafe { self.tail(chunk).write(self.chunks) };
+        unsafe { chunk.cast::<Link>().write(self.chunks) };
         self.chunks = Some(chunk);
-        for index in 0..self.count {
+        for index in 2..self.count {
             unsafe { self.push(chunk.add(index * BLOCK)) };
         }
+        unsafe { chunk.add(BLOCK) }
     }
 }
 
@@ -109,14 +114,13 @@ impl Default for Blocks {
 
 impl Pool for Blocks {
     fn pop(&mut self) -> NonNull<u8> {
-        if self.free.is_none() {
-            self.grow();
+        match self.free {
+            Some(block) => {
+                self.free = unsafe { block.cast::<Link>().read() };
+                block
+            }
+            None => self.grow(),
         }
-        let block = self
-            .free
-            .unwrap_or_else(|| panic!("a chunk of {} blocks has no block to pop", self.count));
-        self.free = unsafe { block.cast::<Link>().read() };
-        block
     }
     unsafe fn push(&mut self, block: NonNull<u8>) {
         unsafe { block.cast::<Link>().write(self.free) };
@@ -127,7 +131,7 @@ impl Pool for Blocks {
 impl Drop for Blocks {
     fn drop(&mut self) {
         while let Some(chunk) = self.chunks {
-            self.chunks = unsafe { self.tail(chunk).read() };
+            self.chunks = unsafe { chunk.cast::<Link>().read() };
             unsafe { System.dealloc(chunk.as_ptr(), self.layout()) };
         }
     }
@@ -163,12 +167,12 @@ mod tests {
     #[test]
     fn popping_past_one_chunk_takes_another_chunk() {
         let mut pool = Blocks::new(3);
-        let start = (0..3)
+        let start = (0..2)
             .map(|_| pool.pop().addr().get())
             .min()
             .unwrap_or_default();
         assert!(
-            !(start..start + 3 * 4096).contains(&pool.pop().addr().get()),
+            !(start - 4096..start + 2 * 4096).contains(&pool.pop().addr().get()),
             "the block popped past the first chunk does not come from another chunk"
         );
     }
@@ -181,6 +185,17 @@ mod tests {
         assert!(
             address.windows(2).all(|pair| pair[1] - pair[0] >= 4096),
             "two popped blocks overlap"
+        );
+    }
+
+    #[test]
+    fn header_block_of_a_chunk_is_never_handed_out() {
+        let mut pool = Blocks::new(2);
+        let mut address: Vec<usize> = (0..19).map(|_| pool.pop().addr().get()).collect();
+        address.sort_unstable();
+        assert!(
+            address.windows(2).all(|pair| pair[1] - pair[0] >= 2 * 4096),
+            "the header block of a chunk is handed out by a pop"
         );
     }
 
