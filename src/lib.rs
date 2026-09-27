@@ -6,3 +6,4 @@
 #![deny(clippy::pedantic, missing_docs)]
 
 pub mod pool;
+pub mod region;
