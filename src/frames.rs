@@ -25,8 +25,10 @@ pub trait Frames {
     ///
     /// # Safety
     ///
-    /// The address must lie inside memory that `alloc` or `bytes` of
-    /// this very stack handed out, in a frame that is still open.
+    /// The address must lie inside the words that `alloc` or `bytes` of
+    /// this very stack handed out, in a frame that is still open; one
+    /// past the end of an allocation is not inside it. Both refuse a
+    /// request of zero words, so every pointer they return qualifies.
     unsafe fn region_of(&self, address: NonNull<u8>) -> usize;
 }
 

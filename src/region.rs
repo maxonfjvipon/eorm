@@ -69,9 +69,15 @@ pub(crate) struct Header {
 /// ```
 ///
 /// An allocation of `n` words that fits costs one compare and one add.
-/// A fresh lane has no block, and its `bump` and `limit` are the same
-/// dangling address, so the first allocation finds no room and takes
-/// the slow path, with no special case on the fast one.
+/// The compare is `n - 1 >= room` in wrapping arithmetic, where `room`
+/// is the number of words left between `bump` and `limit`: it takes the
+/// fast path exactly when `1 <= n <= room`, and sends a request of zero
+/// words, which wraps to the largest number, to the slow path, which
+/// fails fast on it. So every pointer a lane hands out points at a word
+/// inside a block. A fresh lane has no block, and its `bump` and
+/// `limit` are the same dangling address, so the first allocation finds
+/// no room and takes the slow path, with no special case on the fast
+/// one.
 ///
 /// The `unsafe` here is sound because `bump` only moves inside the
 /// current block: the fast path adds `n` words only after checking that
@@ -104,7 +110,7 @@ impl Lane {
     }
     /// Hands out `words` words, stamping any new block with the owner.
     fn alloc(&mut self, pool: &mut impl Pool, words: usize, owner: usize) -> NonNull<u8> {
-        if words > (self.limit.addr().get() - self.bump.addr().get()) / WORD {
+        if words.wrapping_sub(1) >= (self.limit.addr().get() - self.bump.addr().get()) / WORD {
             self.grow(pool, words, owner);
         }
         let object = self.bump;
@@ -125,6 +131,10 @@ impl Lane {
     /// Takes a fresh block from the pool, stamps its header and makes it
     /// the current block of the lane.
     fn grow<P: Pool>(&mut self, pool: &mut P, words: usize, owner: usize) {
+        assert!(
+            words > 0,
+            "a request of zero words has no memory to point at"
+        );
         assert!(
             words <= (P::SIZE - size_of::<Header>()) / WORD,
             "a request of {words} words does not fit in an empty block of {} bytes",
