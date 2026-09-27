@@ -16,6 +16,14 @@ pub trait Region {
     fn alloc(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8>;
     /// Hands out room for `words` words of bytes, word aligned.
     fn bytes(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8>;
+    /// Gives every block of both lanes back to the pool.
+    ///
+    /// # Safety
+    ///
+    /// The pool must be the one every allocation of this region took
+    /// its blocks from, and nothing may touch the region's memory
+    /// afterwards.
+    unsafe fn release(self, pool: &mut impl Pool);
 }
 
 /// The first two words of every block a lane takes.
@@ -37,8 +45,8 @@ pub trait Region {
 ///  instead of copied (`MEMORY.md` §9 and §13). Until then an oversized
 ///  request fails fast in `Lane::grow`.
 #[repr(C)]
-struct Header {
-    owner: usize,
+pub(crate) struct Header {
+    pub(crate) owner: usize,
     next: Option<NonNull<u8>>,
 }
 
@@ -74,6 +82,11 @@ struct Header {
 /// fresh block, which is word aligned because blocks are aligned to
 /// their size, and which nobody else holds, since the pool gave it to
 /// this lane alone.
+///
+/// `release` consumes the lane, so its blocks go back only once. It
+/// visits each block of the chain once, reading the block's header
+/// while the lane still holds it, before `push` hands the block back
+/// and the pool overwrites its first word.
 struct Lane {
     block: Option<NonNull<u8>>,
     bump: NonNull<u8>,
@@ -97,6 +110,17 @@ impl Lane {
         let object = self.bump;
         self.bump = unsafe { object.add(words * WORD) };
         object
+    }
+    /// Pushes every block of the lane back onto the pool, youngest first,
+    /// reading each block's link before the pool overwrites it.
+    ///
+    /// The pool must be the one the lane took its blocks from.
+    unsafe fn release(self, pool: &mut impl Pool) {
+        let mut cursor = self.block;
+        while let Some(block) = cursor {
+            cursor = unsafe { block.cast::<Header>().read() }.next;
+            unsafe { pool.push(block) };
+        }
     }
     /// Takes a fresh block from the pool, stamps its header and makes it
     /// the current block of the lane.
@@ -149,6 +173,12 @@ impl Region for Lanes {
     }
     fn bytes(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8> {
         self.bytes.alloc(pool, words, self.number)
+    }
+    unsafe fn release(self, pool: &mut impl Pool) {
+        unsafe {
+            self.objects.release(pool);
+            self.bytes.release(pool);
+        };
     }
 }
 
