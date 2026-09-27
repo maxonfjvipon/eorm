@@ -18,38 +18,27 @@ pub trait Region {
     fn bytes(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8>;
 }
 
-/// What a block holds, the second word of its header.
-///
-/// @todo #9:60min A payload larger than an empty block needs a third
-///  kind, oversized, and a lane that takes it as one run of blocks, so
-///  that it can be relinked instead of copied (`MEMORY.md` §9 and §13).
-///  Until then such a request fails fast in `Lane::grow`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(usize)]
-enum Kind {
-    /// The block holds objects.
-    Objects,
-    /// The block holds payload bytes.
-    Bytes,
-}
-
-/// The first three words of every block a lane takes.
+/// The first two words of every block a lane takes.
 ///
 /// ```text
-///   block ──► ┌───────┬──────┬──────┬─────────────────────────────┐
-///             │ owner │ kind │ next │ words of the lane ...       │
-///             └───────┴──────┴───┬──┴─────────────────────────────┘
-///             0       8      16  │ 24                          4096
-///                                └──► the lane's previous block
+///   block ──► ┌───────┬──────┬────────────────────────────────────┐
+///             │ owner │ next │ words of the lane ...              │
+///             └───────┴──┬───┴────────────────────────────────────┘
+///             0       8  │   16                                4096
+///                        └──► the lane's previous block
 /// ```
 ///
 /// The owner is the number of the frame whose region took the block,
 /// so the age of anything inside it is one read away; `next` chains the
 /// blocks of one lane, so the whole lane can be walked and given back.
+///
+/// @todo #9:60min An oversized payload needs a run of blocks and a kind
+///  word in the header telling it apart, so that it can be relinked
+///  instead of copied (`MEMORY.md` §9 and §13). Until then an oversized
+///  request fails fast in `Lane::grow`.
 #[repr(C)]
 struct Header {
     owner: usize,
-    kind: Kind,
     next: Option<NonNull<u8>>,
 }
 
@@ -81,7 +70,7 @@ struct Header {
 /// `n` words fit between `bump` and `limit`, and the slow path points
 /// `bump` just past the header and `limit` at the end of a block the
 /// pool has just handed out, which the `Pool` contract makes `SIZE`
-/// bytes long. The header write lands on the first three words of that
+/// bytes long. The header write lands on the first two words of that
 /// fresh block, which is word aligned because blocks are aligned to
 /// their size, and which nobody else holds, since the pool gave it to
 /// this lane alone.
@@ -100,17 +89,10 @@ impl Lane {
             limit: NonNull::dangling(),
         }
     }
-    /// Hands out `words` words, stamping any new block with the owner
-    /// and the kind.
-    fn alloc(
-        &mut self,
-        pool: &mut impl Pool,
-        words: usize,
-        owner: usize,
-        kind: Kind,
-    ) -> NonNull<u8> {
+    /// Hands out `words` words, stamping any new block with the owner.
+    fn alloc(&mut self, pool: &mut impl Pool, words: usize, owner: usize) -> NonNull<u8> {
         if words > (self.limit.addr().get() - self.bump.addr().get()) / WORD {
-            self.grow(pool, words, owner, kind);
+            self.grow(pool, words, owner);
         }
         let object = self.bump;
         self.bump = unsafe { object.add(words * WORD) };
@@ -118,7 +100,7 @@ impl Lane {
     }
     /// Takes a fresh block from the pool, stamps its header and makes it
     /// the current block of the lane.
-    fn grow<P: Pool>(&mut self, pool: &mut P, words: usize, owner: usize, kind: Kind) {
+    fn grow<P: Pool>(&mut self, pool: &mut P, words: usize, owner: usize) {
         assert!(
             words <= (P::SIZE - size_of::<Header>()) / WORD,
             "a request of {words} words does not fit in an empty block of {} bytes",
@@ -128,7 +110,6 @@ impl Lane {
         unsafe {
             block.cast::<Header>().write(Header {
                 owner,
-                kind,
                 next: self.block,
             });
         };
@@ -164,16 +145,16 @@ impl Lanes {
 
 impl Region for Lanes {
     fn alloc(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8> {
-        self.objects.alloc(pool, words, self.number, Kind::Objects)
+        self.objects.alloc(pool, words, self.number)
     }
     fn bytes(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8> {
-        self.bytes.alloc(pool, words, self.number, Kind::Bytes)
+        self.bytes.alloc(pool, words, self.number)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Header, Kind, Lanes, Region};
+    use super::{Header, Lanes, Region};
     use crate::pool::{Blocks, Pool};
     use std::ptr::NonNull;
 
@@ -216,7 +197,7 @@ mod tests {
         };
         let mut region = Lanes::new(4);
         region.alloc(&mut pool, 300);
-        region.alloc(&mut pool, 209);
+        region.alloc(&mut pool, 210);
         assert_eq!(
             pool.blocks.len(),
             1,
@@ -232,7 +213,7 @@ mod tests {
         };
         let mut region = Lanes::new(4);
         region.alloc(&mut pool, 300);
-        region.alloc(&mut pool, 210);
+        region.alloc(&mut pool, 211);
         assert_eq!(
             pool.blocks.len(),
             2,
@@ -251,34 +232,6 @@ mod tests {
             unsafe { pool.blocks[0].cast::<Header>().read() }.owner,
             23,
             "the owner word of a taken block is not the frame number"
-        );
-    }
-
-    #[test]
-    fn objects_lane_stamps_its_blocks_as_objects() {
-        let mut pool = Traced {
-            pool: Blocks::new(9),
-            blocks: Vec::new(),
-        };
-        Lanes::new(31).alloc(&mut pool, 17);
-        assert_eq!(
-            unsafe { pool.blocks[0].cast::<Header>().read() }.kind,
-            Kind::Objects,
-            "a block of the objects lane is not stamped as objects"
-        );
-    }
-
-    #[test]
-    fn bytes_lane_stamps_its_blocks_as_bytes() {
-        let mut pool = Traced {
-            pool: Blocks::new(9),
-            blocks: Vec::new(),
-        };
-        Lanes::new(31).bytes(&mut pool, 17);
-        assert_eq!(
-            unsafe { pool.blocks[0].cast::<Header>().read() }.kind,
-            Kind::Bytes,
-            "a block of the bytes lane is not stamped as bytes"
         );
     }
 

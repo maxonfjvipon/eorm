@@ -16,7 +16,7 @@ type Link = Option<NonNull<u8>>;
 ///
 /// Regions write into the blocks they pop without asking, so a pool
 /// must keep its promises: `SIZE` is a power of two, a whole number of
-/// words, and larger than a block header of three words; every block
+/// words, and larger than a block header of two words; every block
 /// `pop` hands out is `SIZE` bytes of live memory aligned to `SIZE`,
 /// and nobody else holds it until it is pushed back.
 pub unsafe trait Pool {
