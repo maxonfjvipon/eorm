@@ -98,13 +98,12 @@ impl<P: Pool> Frames for Stack<P> {
         self.regions.push(Lanes::new(self.regions.len()));
     }
     fn leave(&mut self) {
-        assert!(
-            self.regions.len() > 1,
-            "frame 0 is the program region and is never left"
-        );
-        if let Some(region) = self.regions.pop() {
-            unsafe { region.release(&mut self.pool) };
-        }
+        let depth = self.depth();
+        let region = self
+            .regions
+            .pop_if(|_| depth > 0)
+            .unwrap_or_else(|| panic!("frame 0 is the program region and is never left"));
+        unsafe { region.release(&mut self.pool) };
     }
     fn depth(&self) -> usize {
         self.regions.len() - 1
