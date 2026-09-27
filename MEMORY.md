@@ -135,8 +135,9 @@ anything cached into them. It is never given back.
 ## 7. Blocks and regions
 
 Memory is a pool of equal blocks — 4 KB to start; tuning, not design.
-Each block has a header: owner frame number, kind (objects, bytes,
-oversized), and a link to the next block of the same region.
+Each block has a header: owner frame number and a link to the next
+block of the same region. A kind word joins them with oversized blocks
+(§13).
 
 A **region** is a frame's memory: two lists of blocks, one for objects and
 one for bytes, described by six words in the frame's stack entry —

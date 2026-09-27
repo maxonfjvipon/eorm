@@ -3,9 +3,6 @@
 use std::alloc::{GlobalAlloc, Layout, System, handle_alloc_error};
 use std::ptr::NonNull;
 
-/// The size of a block in bytes, which is also its alignment.
-const BLOCK: usize = 4096;
-
 /// The word that links one free block or one chunk to the next.
 type Link = Option<NonNull<u8>>;
 
@@ -14,8 +11,18 @@ type Link = Option<NonNull<u8>>;
 /// A region takes a block when its current one is full and gives all
 /// of its blocks back when its frame ends; the pool is where they come
 /// from and where they return, so both moves cost one pointer swap.
-pub trait Pool {
-    /// Hands out a free block of 4 KB that starts on a 4 KB boundary.
+///
+/// # Safety
+///
+/// Regions write into the blocks they pop without asking, so a pool
+/// must keep its promises: `SIZE` is a power of two, a whole number of
+/// words, and larger than a block header of two words; every block
+/// `pop` hands out is `SIZE` bytes of live memory aligned to `SIZE`,
+/// and nobody else holds it until it is pushed back.
+pub unsafe trait Pool {
+    /// The size of every block in bytes, which is also its alignment.
+    const SIZE: usize;
+    /// Hands out a free block of `SIZE` bytes aligned to `SIZE`.
     fn pop(&mut self) -> NonNull<u8>;
     /// Takes a block back, so a later `pop` may hand it out again.
     ///
@@ -88,8 +95,8 @@ impl Blocks {
             self.count
         );
         self.count
-            .checked_mul(BLOCK)
-            .and_then(|size| Layout::from_size_align(size, BLOCK).ok())
+            .checked_mul(Self::SIZE)
+            .and_then(|size| Layout::from_size_align(size, Self::SIZE).ok())
             .unwrap_or_else(|| panic!("a chunk of {} blocks does not fit in memory", self.count))
     }
     /// Takes one more chunk from `System`, pushes all of its blocks but
@@ -100,9 +107,9 @@ impl Blocks {
         unsafe { chunk.cast::<Link>().write(self.chunks) };
         self.chunks = Some(chunk);
         for index in 2..self.count {
-            unsafe { self.push(chunk.add(index * BLOCK)) };
+            unsafe { self.push(chunk.add(index * Self::SIZE)) };
         }
-        unsafe { chunk.add(BLOCK) }
+        unsafe { chunk.add(Self::SIZE) }
     }
 }
 
@@ -112,7 +119,8 @@ impl Default for Blocks {
     }
 }
 
-impl Pool for Blocks {
+unsafe impl Pool for Blocks {
+    const SIZE: usize = 4096;
     fn pop(&mut self) -> NonNull<u8> {
         match self.free {
             Some(block) => {
