@@ -12,10 +12,20 @@ const WORD: usize = size_of::<u64>();
 /// and payload bytes in the other, so that all of it can later go back
 /// to the pool at once, block by block, when the frame ends.
 pub trait Region {
-    /// Hands out room for `words` words of objects, word aligned.
+    /// Hands out room for `words` words of objects, word aligned;
+    /// zero words, or more than a block holds, fails fast.
     fn alloc(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8>;
-    /// Hands out room for `words` words of bytes, word aligned.
+    /// Hands out room for `words` words of bytes, word aligned;
+    /// zero words, or more than a block holds, fails fast.
     fn bytes(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8>;
+    /// Gives every block of both lanes back to the pool.
+    ///
+    /// # Safety
+    ///
+    /// The pool must be the one every allocation of this region took
+    /// its blocks from, and nothing may touch the region's memory
+    /// afterwards.
+    unsafe fn release(self, pool: &mut impl Pool);
 }
 
 /// The first two words of every block a lane takes.
@@ -37,8 +47,8 @@ pub trait Region {
 ///  instead of copied (`MEMORY.md` §9 and §13). Until then an oversized
 ///  request fails fast in `Lane::grow`.
 #[repr(C)]
-struct Header {
-    owner: usize,
+pub(crate) struct Header {
+    pub(crate) owner: usize,
     next: Option<NonNull<u8>>,
 }
 
@@ -61,9 +71,15 @@ struct Header {
 /// ```
 ///
 /// An allocation of `n` words that fits costs one compare and one add.
-/// A fresh lane has no block, and its `bump` and `limit` are the same
-/// dangling address, so the first allocation finds no room and takes
-/// the slow path, with no special case on the fast one.
+/// The compare is `n - 1 >= room` in wrapping arithmetic, where `room`
+/// is the number of words left between `bump` and `limit`: it takes the
+/// fast path exactly when `1 <= n <= room`, and sends a request of zero
+/// words, which wraps to the largest number, to the slow path, which
+/// fails fast on it. So every pointer a lane hands out points at a word
+/// inside a block. A fresh lane has no block, and its `bump` and
+/// `limit` are the same dangling address, so the first allocation finds
+/// no room and takes the slow path, with no special case on the fast
+/// one.
 ///
 /// The `unsafe` here is sound because `bump` only moves inside the
 /// current block: the fast path adds `n` words only after checking that
@@ -74,6 +90,11 @@ struct Header {
 /// fresh block, which is word aligned because blocks are aligned to
 /// their size, and which nobody else holds, since the pool gave it to
 /// this lane alone.
+///
+/// `release` consumes the lane, so its blocks go back only once. It
+/// visits each block of the chain once, reading the block's header
+/// while the lane still holds it, before `push` hands the block back
+/// to the pool, which may write over any of it from then on.
 struct Lane {
     block: Option<NonNull<u8>>,
     bump: NonNull<u8>,
@@ -91,16 +112,31 @@ impl Lane {
     }
     /// Hands out `words` words, stamping any new block with the owner.
     fn alloc(&mut self, pool: &mut impl Pool, words: usize, owner: usize) -> NonNull<u8> {
-        if words > (self.limit.addr().get() - self.bump.addr().get()) / WORD {
+        if words.wrapping_sub(1) >= (self.limit.addr().get() - self.bump.addr().get()) / WORD {
             self.grow(pool, words, owner);
         }
         let object = self.bump;
         self.bump = unsafe { object.add(words * WORD) };
         object
     }
+    /// Pushes every block of the lane back onto the pool, youngest first,
+    /// reading each block's link before the pool may write over it.
+    ///
+    /// The pool must be the one the lane took its blocks from.
+    unsafe fn release(self, pool: &mut impl Pool) {
+        let mut cursor = self.block;
+        while let Some(block) = cursor {
+            cursor = unsafe { block.cast::<Header>().read() }.next;
+            unsafe { pool.push(block) };
+        }
+    }
     /// Takes a fresh block from the pool, stamps its header and makes it
     /// the current block of the lane.
     fn grow<P: Pool>(&mut self, pool: &mut P, words: usize, owner: usize) {
+        assert!(
+            words > 0,
+            "a request of zero words has no memory to point at"
+        );
         assert!(
             words <= (P::SIZE - size_of::<Header>()) / WORD,
             "a request of {words} words does not fit in an empty block of {} bytes",
@@ -150,6 +186,12 @@ impl Region for Lanes {
     fn bytes(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8> {
         self.bytes.alloc(pool, words, self.number)
     }
+    unsafe fn release(self, pool: &mut impl Pool) {
+        unsafe {
+            self.objects.release(pool);
+            self.bytes.release(pool);
+        };
+    }
 }
 
 #[cfg(test)]
@@ -158,11 +200,13 @@ mod tests {
     use crate::pool::{Blocks, Pool};
     use std::ptr::NonNull;
 
-    /// A pool that remembers every block it hands out, so a test can
-    /// look at the header a region wrote there.
+    /// A pool that remembers every block it hands out and takes back,
+    /// so a test can look at the header a region wrote there, and that
+    /// wipes every block it takes back, as any pool may.
     struct Traced {
         pool: Blocks,
         blocks: Vec<NonNull<u8>>,
+        pushes: Vec<NonNull<u8>>,
     }
 
     unsafe impl Pool for Traced {
@@ -173,7 +217,11 @@ mod tests {
             block
         }
         unsafe fn push(&mut self, block: NonNull<u8>) {
-            unsafe { self.pool.push(block) };
+            self.pushes.push(block);
+            unsafe {
+                block.write_bytes(0, Self::SIZE);
+                self.pool.push(block);
+            };
         }
     }
 
@@ -194,6 +242,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(6),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(4);
         region.alloc(&mut pool, 300);
@@ -210,6 +259,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(6),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(4);
         region.alloc(&mut pool, 300);
@@ -226,6 +276,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(3),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         Lanes::new(23).alloc(&mut pool, 5);
         assert_eq!(
@@ -240,6 +291,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(11),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(2);
         region.alloc(&mut pool, 3);
@@ -256,6 +308,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(4),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(13);
         region.bytes(&mut pool, 400);
@@ -264,6 +317,29 @@ mod tests {
             unsafe { pool.blocks[1].cast::<Header>().read() }.next,
             Some(pool.blocks[0]),
             "a new block does not link to the lane's previous block"
+        );
+    }
+
+    #[test]
+    fn release_pushes_back_every_block_of_both_lanes() {
+        let mut pool = Traced {
+            pool: Blocks::new(8),
+            blocks: Vec::new(),
+            pushes: Vec::new(),
+        };
+        let mut region = Lanes::new(6);
+        for words in [310, 207, 490] {
+            region.alloc(&mut pool, words);
+        }
+        for words in [120, 400, 399] {
+            region.bytes(&mut pool, words);
+        }
+        unsafe { region.release(&mut pool) };
+        pool.blocks.sort_unstable();
+        pool.pushes.sort_unstable();
+        assert_eq!(
+            pool.pushes, pool.blocks,
+            "release does not push back exactly the blocks the region took"
         );
     }
 }

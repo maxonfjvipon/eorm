@@ -76,7 +76,8 @@ in §9.
 |---|---|---|
 | values | `value.rs` | the tagged 64-bit word: float, bool, small payload, pointer, empty (`MEMORY.md` §3) |
 | pool | `pool.rs` | 4 KB blocks from the OS, intrusive free list (the next pointer lives inside the free block; the pool never allocates for itself) |
-| regions | `region.rs` | per-frame descriptor: two block lists (objects, bytes), bump and limit each; `enter`, `alloc`, `bytes`, `leave`, `region_of` (§7) |
+| regions | `region.rs` | per-frame descriptor: two block lists (objects, bytes), bump and limit each; `alloc`, `bytes`, `release` (§7) |
+| frames | `frames.rs` | the frame stack: owns the pool and one region per open frame; `enter`, `leave`, `alloc` into any open frame, `region_of` (§6, §7) |
 | copy | `copy.rs` | the Cheney copy of a young part under a budget, forwarding word in the dying original's header; relink of both lists past the budget (§9) |
 | shapes | `shape.rs` | the static table per program: voids, memo slots, φ, λ, bodies as Rust functions (§4) |
 | objects | `object.rs` | header, ρ, slots; thunks (§4) |
