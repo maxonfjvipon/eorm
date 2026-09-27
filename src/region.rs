@@ -92,7 +92,7 @@ pub(crate) struct Header {
 /// `release` consumes the lane, so its blocks go back only once. It
 /// visits each block of the chain once, reading the block's header
 /// while the lane still holds it, before `push` hands the block back
-/// and the pool overwrites its first word.
+/// to the pool, which may write over any of it from then on.
 struct Lane {
     block: Option<NonNull<u8>>,
     bump: NonNull<u8>,
@@ -118,7 +118,7 @@ impl Lane {
         object
     }
     /// Pushes every block of the lane back onto the pool, youngest first,
-    /// reading each block's link before the pool overwrites it.
+    /// reading each block's link before the pool may write over it.
     ///
     /// The pool must be the one the lane took its blocks from.
     unsafe fn release(self, pool: &mut impl Pool) {
@@ -198,11 +198,13 @@ mod tests {
     use crate::pool::{Blocks, Pool};
     use std::ptr::NonNull;
 
-    /// A pool that remembers every block it hands out, so a test can
-    /// look at the header a region wrote there.
+    /// A pool that remembers every block it hands out and takes back,
+    /// so a test can look at the header a region wrote there, and that
+    /// wipes every block it takes back, as any pool may.
     struct Traced {
         pool: Blocks,
         blocks: Vec<NonNull<u8>>,
+        pushes: Vec<NonNull<u8>>,
     }
 
     unsafe impl Pool for Traced {
@@ -213,7 +215,11 @@ mod tests {
             block
         }
         unsafe fn push(&mut self, block: NonNull<u8>) {
-            unsafe { self.pool.push(block) };
+            self.pushes.push(block);
+            unsafe {
+                block.write_bytes(0, Self::SIZE);
+                self.pool.push(block);
+            };
         }
     }
 
@@ -234,6 +240,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(6),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(4);
         region.alloc(&mut pool, 300);
@@ -250,6 +257,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(6),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(4);
         region.alloc(&mut pool, 300);
@@ -266,6 +274,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(3),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         Lanes::new(23).alloc(&mut pool, 5);
         assert_eq!(
@@ -280,6 +289,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(11),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(2);
         region.alloc(&mut pool, 3);
@@ -296,6 +306,7 @@ mod tests {
         let mut pool = Traced {
             pool: Blocks::new(4),
             blocks: Vec::new(),
+            pushes: Vec::new(),
         };
         let mut region = Lanes::new(13);
         region.bytes(&mut pool, 400);
@@ -304,6 +315,29 @@ mod tests {
             unsafe { pool.blocks[1].cast::<Header>().read() }.next,
             Some(pool.blocks[0]),
             "a new block does not link to the lane's previous block"
+        );
+    }
+
+    #[test]
+    fn release_pushes_back_every_block_of_both_lanes() {
+        let mut pool = Traced {
+            pool: Blocks::new(8),
+            blocks: Vec::new(),
+            pushes: Vec::new(),
+        };
+        let mut region = Lanes::new(6);
+        for words in [310, 207, 490] {
+            region.alloc(&mut pool, words);
+        }
+        for words in [120, 400, 399] {
+            region.bytes(&mut pool, words);
+        }
+        unsafe { region.release(&mut pool) };
+        pool.blocks.sort_unstable();
+        pool.pushes.sort_unstable();
+        assert_eq!(
+            pool.pushes, pool.blocks,
+            "release does not push back exactly the blocks the region took"
         );
     }
 }
