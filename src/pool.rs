@@ -11,10 +11,18 @@ type Link = Option<NonNull<u8>>;
 /// A region takes a block when its current one is full and gives all
 /// of its blocks back when its frame ends; the pool is where they come
 /// from and where they return, so both moves cost one pointer swap.
-pub trait Pool {
+///
+/// # Safety
+///
+/// Regions write into the blocks they pop without asking, so a pool
+/// must keep its promises: `SIZE` is a power of two, a whole number of
+/// words, and larger than a block header of three words; every block
+/// `pop` hands out is `SIZE` bytes of live memory aligned to `SIZE`,
+/// and nobody else holds it until it is pushed back.
+pub unsafe trait Pool {
     /// The size of every block in bytes, which is also its alignment.
     const SIZE: usize;
-    /// Hands out a free block of 4 KB that starts on a 4 KB boundary.
+    /// Hands out a free block of `SIZE` bytes aligned to `SIZE`.
     fn pop(&mut self) -> NonNull<u8>;
     /// Takes a block back, so a later `pop` may hand it out again.
     ///
@@ -111,7 +119,7 @@ impl Default for Blocks {
     }
 }
 
-impl Pool for Blocks {
+unsafe impl Pool for Blocks {
     const SIZE: usize = 4096;
     fn pop(&mut self) -> NonNull<u8> {
         match self.free {
