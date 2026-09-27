@@ -48,9 +48,23 @@ pub unsafe trait Pool {
 /// ```
 ///
 /// The headers chain every chunk ever taken, so `drop` can give them
-/// all back to `System`. A free block holds, in its first word, the
-/// address of the next free block, so the free list is threaded through
-/// the free blocks themselves:
+/// all back to `System`. The blocks of the newest chunk that nobody has
+/// used yet are a fresh run, handed out in address order by bumping the
+/// `fresh` cursor, which is `None` once the run is used up:
+///
+/// ```text
+///   chunks ──► ┌────────┬─────────┬─────────┬─────────┬─────────┐
+///              │ header │ in use  │ in use  │  fresh  │  fresh  │
+///              └────────┴─────────┴─────────┴─────────┴─────────┘
+///                                             ▲                   ▲
+///                                           fresh      chunk + count * 4096
+/// ```
+///
+/// Nothing writes into a fresh block before a caller has it, so the
+/// operating system backs a page of a chunk with real memory only when
+/// its block is first used. A block that comes back through `push` is
+/// linked into the free list, which is threaded through the free blocks
+/// themselves, the first word of each holding the address of the next:
 ///
 /// ```text
 ///   free ──► ┌──────┬───┐   ┌──────┬───┐   ┌──────┬───┐
@@ -58,7 +72,10 @@ pub unsafe trait Pool {
 ///            └──────┴───┘   └──────┴───┘   └──────┴───┘
 /// ```
 ///
-/// Neither list needs memory of its own, so the pool never touches the
+/// `pop` takes from the free list first, then from the fresh run, and
+/// takes a new chunk only when both are empty.
+///
+/// None of this needs memory of its own, so the pool never touches the
 /// global allocator, and the chunk layout is an exact multiple of 4 KB,
 /// so no byte of it spills into a page the pool cannot use. Every
 /// `unsafe` block here is sound for one reason: each address it reads
@@ -66,13 +83,17 @@ pub unsafe trait Pool {
 /// aligned for a link word, and that block is either free, so the pool
 /// owns its memory until `pop` hands it out, or a header, which nobody
 /// but the pool ever sees. Every block is 4 KB aligned because the
-/// chunk is and blocks sit at multiples of 4 KB inside it; a chunk has
-/// at least two blocks, so block 1, the one `grow` hands out, lies
-/// inside it. Chunks are freed with the same layout they were taken
-/// with, once each, when the pool itself dies.
+/// chunk is and blocks sit at multiples of 4 KB inside it. The fresh
+/// cursor never leaves its chunk: it moves one block forward only when
+/// the next block still starts before the chunk's end, and becomes
+/// `None` otherwise, and since a chunk has at least two blocks, block 1,
+/// the one `grow` hands out, lies inside it. Chunks are freed with the
+/// same layout they were taken with, once each, when the pool itself
+/// dies.
 pub struct Blocks {
     count: usize,
     free: Link,
+    fresh: Link,
     chunks: Link,
 }
 
@@ -84,6 +105,7 @@ impl Blocks {
         Self {
             count,
             free: None,
+            fresh: None,
             chunks: None,
         }
     }
@@ -99,17 +121,25 @@ impl Blocks {
             .and_then(|size| Layout::from_size_align(size, Self::SIZE).ok())
             .unwrap_or_else(|| panic!("a chunk of {} blocks does not fit in memory", self.count))
     }
-    /// Takes one more chunk from `System`, pushes all of its blocks but
-    /// the header and the first one, and hands out the first one.
+    /// The block right after `block` in the newest chunk, or `None` when
+    /// `block` is the chunk's last one.
+    fn next(&self, block: NonNull<u8>) -> Link {
+        self.chunks
+            .filter(|chunk| {
+                block.addr().get() + Self::SIZE < chunk.addr().get() + self.count * Self::SIZE
+            })
+            .map(|_| unsafe { block.add(Self::SIZE) })
+    }
+    /// Takes one more chunk from `System`, starts its fresh run right
+    /// after block 1, and hands out block 1.
     fn grow(&mut self) -> NonNull<u8> {
         let chunk = NonNull::new(unsafe { System.alloc(self.layout()) })
             .unwrap_or_else(|| handle_alloc_error(self.layout()));
         unsafe { chunk.cast::<Link>().write(self.chunks) };
         self.chunks = Some(chunk);
-        for index in 2..self.count {
-            unsafe { self.push(chunk.add(index * Self::SIZE)) };
-        }
-        unsafe { chunk.add(Self::SIZE) }
+        let block = unsafe { chunk.add(Self::SIZE) };
+        self.fresh = self.next(block);
+        block
     }
 }
 
@@ -122,12 +152,16 @@ impl Default for Blocks {
 unsafe impl Pool for Blocks {
     const SIZE: usize = 4096;
     fn pop(&mut self) -> NonNull<u8> {
-        match self.free {
-            Some(block) => {
+        match (self.free, self.fresh) {
+            (Some(block), _) => {
                 self.free = unsafe { block.cast::<Link>().read() };
                 block
             }
-            None => self.grow(),
+            (None, Some(block)) => {
+                self.fresh = self.next(block);
+                block
+            }
+            (None, None) => self.grow(),
         }
     }
     unsafe fn push(&mut self, block: NonNull<u8>) {
@@ -214,6 +248,45 @@ mod tests {
             (0..37).map(|_| pool.pop()).collect::<HashSet<_>>().len(),
             37,
             "two pops give the same block"
+        );
+    }
+
+    #[test]
+    fn fresh_chunk_hands_out_its_blocks_in_address_order() {
+        let mut pool = Blocks::new(9);
+        let address: Vec<usize> = (0..8).map(|_| pool.pop().addr().get()).collect();
+        assert!(
+            address.windows(2).all(|pair| pair[1] == pair[0] + 4096),
+            "a fresh chunk does not hand out its blocks one after another"
+        );
+    }
+
+    #[test]
+    fn pushed_block_is_handed_out_before_a_fresh_one() {
+        let mut pool = Blocks::new(13);
+        pool.pop();
+        let block = pool.pop();
+        pool.pop();
+        unsafe { pool.push(block) };
+        assert_eq!(
+            pool.pop(),
+            block,
+            "a fresh block is handed out while a pushed one waits"
+        );
+    }
+
+    #[test]
+    fn popping_a_whole_chunk_takes_exactly_one_more_chunk() {
+        let mut pool = Blocks::new(6);
+        let start = (0..5)
+            .map(|_| pool.pop().addr().get())
+            .min()
+            .unwrap_or_default();
+        let next = pool.pop().addr().get();
+        assert!(
+            !(start - 4096..start + 5 * 4096).contains(&next)
+                && pool.pop().addr().get() == next + 4096,
+            "the pop past a whole chunk does not start exactly one new chunk"
         );
     }
 }
