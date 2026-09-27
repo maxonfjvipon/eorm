@@ -17,9 +17,11 @@ pub trait Frames {
     fn leave(&mut self);
     /// The number of the youngest open frame.
     fn depth(&self) -> usize;
-    /// Hands out `words` words of objects in the region of `frame`.
+    /// Hands out `words` words of objects in the region of `frame`;
+    /// zero words, or more than a block holds, fails fast.
     fn alloc(&mut self, frame: usize, words: usize) -> NonNull<u8>;
-    /// Hands out `words` words of bytes in the region of `frame`.
+    /// Hands out `words` words of bytes in the region of `frame`;
+    /// zero words, or more than a block holds, fails fast.
     fn bytes(&mut self, frame: usize, words: usize) -> NonNull<u8>;
     /// The number of the frame whose region holds `address`.
     ///

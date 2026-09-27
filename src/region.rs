@@ -12,9 +12,11 @@ const WORD: usize = size_of::<u64>();
 /// and payload bytes in the other, so that all of it can later go back
 /// to the pool at once, block by block, when the frame ends.
 pub trait Region {
-    /// Hands out room for `words` words of objects, word aligned.
+    /// Hands out room for `words` words of objects, word aligned;
+    /// zero words, or more than a block holds, fails fast.
     fn alloc(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8>;
-    /// Hands out room for `words` words of bytes, word aligned.
+    /// Hands out room for `words` words of bytes, word aligned;
+    /// zero words, or more than a block holds, fails fast.
     fn bytes(&mut self, pool: &mut impl Pool, words: usize) -> NonNull<u8>;
     /// Gives every block of both lanes back to the pool.
     ///
