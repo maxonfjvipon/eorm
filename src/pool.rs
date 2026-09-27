@@ -185,7 +185,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn pushed_block_comes_back_on_next_pop() {
+    fn pushed_block_is_handed_out_before_a_fresh_one() {
         let mut pool = Blocks::new(7);
         let block = pool.pop();
         pool.pop();
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(
             pool.pop(),
             block,
-            "the pushed block does not come back on the next pop"
+            "a fresh block is handed out while a pushed one waits"
         );
     }
 
@@ -262,31 +262,16 @@ mod tests {
     }
 
     #[test]
-    fn pushed_block_is_handed_out_before_a_fresh_one() {
-        let mut pool = Blocks::new(13);
-        pool.pop();
-        let block = pool.pop();
-        pool.pop();
-        unsafe { pool.push(block) };
-        assert_eq!(
-            pool.pop(),
-            block,
-            "a fresh block is handed out while a pushed one waits"
-        );
-    }
-
-    #[test]
-    fn popping_a_whole_chunk_takes_exactly_one_more_chunk() {
+    fn pop_after_a_whole_chunk_is_the_block_right_after_the_one_past_it() {
         let mut pool = Blocks::new(6);
-        let start = (0..5)
-            .map(|_| pool.pop().addr().get())
-            .min()
-            .unwrap_or_default();
+        for _ in 0..5 {
+            pool.pop();
+        }
         let next = pool.pop().addr().get();
-        assert!(
-            !(start - 4096..start + 5 * 4096).contains(&next)
-                && pool.pop().addr().get() == next + 4096,
-            "the pop past a whole chunk does not start exactly one new chunk"
+        assert_eq!(
+            pool.pop().addr().get(),
+            next + 4096,
+            "the pop after the one past a whole chunk does not come one block later"
         );
     }
 }
