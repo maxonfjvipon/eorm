@@ -209,10 +209,12 @@ mod tests {
     fn region_of_names_the_frame_for_an_address_inside_an_object() {
         let mut stack = Stack::new(Blocks::new(3));
         (0..4).for_each(|_| stack.enter());
-        let object = stack.alloc(4, 37);
+        stack.alloc(2, 300);
+        stack.alloc(4, 57);
+        let object = stack.alloc(2, 510);
         assert_eq!(
-            unsafe { stack.region_of(object.add(8 * 19 + 3)) },
-            4,
+            unsafe { stack.region_of(object.add(510 * 8 - 1)) },
+            2,
             "an address inside an object does not name the frame that allocated it"
         );
     }
