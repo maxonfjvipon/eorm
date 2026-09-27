@@ -5,5 +5,6 @@
 //! and counts what it costs.
 #![deny(clippy::pedantic, missing_docs)]
 
+pub mod frames;
 pub mod pool;
 pub mod region;
