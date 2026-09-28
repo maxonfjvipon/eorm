@@ -19,6 +19,12 @@ trait Work {
     fn run(&mut self, reps: usize) -> Duration;
 }
 
+/// A number found out by running the code, not written down.
+trait Quantity {
+    /// The number, measured now.
+    fn amount(&mut self) -> usize;
+}
+
 /// A piece of the results file, as Markdown.
 trait Text {
     /// The Markdown of this piece, computing it if needed.
@@ -81,6 +87,8 @@ impl<A: Work, B: Work> Work for Difference<A, B> {
 /// clock. Each `leave` closes the youngest frame, exactly as a lone one
 /// would, and the blocks of all frames together are as many as the
 /// largest round trip fills, so their headers are as warm as there.
+/// A second pair of readings with nothing between them is taken right
+/// after and subtracted, so the clock's own cost does not count.
 struct Leave {
     stack: Stack<Blocks>,
     words: usize,
@@ -91,6 +99,7 @@ struct Leave {
 impl Work for Leave {
     fn run(&mut self, reps: usize) -> Duration {
         let mut spent = Duration::ZERO;
+        let mut idle = Duration::ZERO;
         for _ in 0..reps {
             for frame in 1..=self.frames {
                 self.stack.enter();
@@ -103,8 +112,34 @@ impl Work for Leave {
                 self.stack.leave();
             }
             spent += start.elapsed();
+            let start = Instant::now();
+            idle += black_box(start).elapsed();
         }
-        spent
+        spent.saturating_sub(idle)
+    }
+}
+
+/// The number of words one block holds after its header.
+///
+/// It is measured, not computed from the block size, since the header
+/// is the region's own business: a fresh frame takes one word at a time
+/// until a word no longer lands right after the one before it, which is
+/// the moment the frame took a new block.
+struct Capacity {
+    stack: Stack<Blocks>,
+}
+
+impl Quantity for Capacity {
+    fn amount(&mut self) -> usize {
+        self.stack.enter();
+        let depth = self.stack.depth();
+        let first = self.stack.alloc(depth, 1).addr().get();
+        let words = 1
+            + (1..Blocks::SIZE / 8)
+                .take_while(|index| self.stack.alloc(depth, 1).addr().get() == first + index * 8)
+                .count();
+        self.stack.leave();
+        words
     }
 }
 
@@ -131,8 +166,8 @@ impl Work for Cycle {
 /// A row of the table: one work, timed with a warm-up and fifteen
 /// samples.
 ///
-/// The warm-up doubles the repetitions until one run takes 10 ms of
-/// wall time, which also warms the caches, the pool and the branch
+/// The warm-up doubles the repetitions until the timed part of one run
+/// takes 10 ms, which also warms the caches, the pool and the branch
 /// predictors; every sample then runs that many repetitions. The row
 /// shows the median nanoseconds per operation, the fastest and the
 /// slowest sample, so noise is visible, and the operations timed per
@@ -147,11 +182,7 @@ struct Timing<W: Work> {
 impl<W: Work> Text for Timing<W> {
     fn text(&mut self) -> String {
         let mut reps = 1;
-        while {
-            let start = Instant::now();
-            self.work.run(reps);
-            start.elapsed() < Duration::from_millis(10)
-        } {
+        while self.work.run(reps) < Duration::from_millis(10) {
             reps *= 2;
         }
         let total =
@@ -329,6 +360,7 @@ impl Text for Leaves {
 struct Results {
     machine: Vec<(&'static str, Shell)>,
     profile: &'static str,
+    capacity: usize,
     rows: Rows,
 }
 
@@ -338,12 +370,13 @@ impl Text for Results {
             "# Bench\n\n\
              Written by `cargo run --release --bin bench`; every run rewrites it.\n\n\
              | machine | |\n|---|---|\n{}\n| profile | {} |\n\n\
-             Each row: a warm-up that doubles the repetitions until one run takes\n\
-             10 ms, then 15 samples of that many repetitions. `median` is the\n\
+             Each row: a warm-up that doubles the repetitions until the timed part\n\
+             of one run takes 10 ms, then 15 samples of that many repetitions. `median` is the\n\
              median of the samples in ns per operation, `spread` is the fastest\n\
              and the slowest sample, `ops` is the operations timed per sample.\n\
-             Allocations run in frame 1, the youngest; a block holds 510 words\n\
-             after its two-word header.\n\n\
+             Allocations run in the youngest frame: frame 1, or for `leave` alone\n\
+             each of the nested frames while it is the youngest. A block holds {}\n\
+             words after its header, measured by this run.\n\n\
              | what | size | median ns | spread ns | ops |\n|---|---|---|---|---|\n{}\n\n\
              eoc, from README §7: 163 ns per object, 45 to allocate and 117 to\n\
              collect.\n",
@@ -353,13 +386,17 @@ impl Text for Results {
                 .collect::<Vec<_>>()
                 .join("\n"),
             self.profile,
+            self.capacity,
             self.rows.text()
         )
     }
 }
 
 fn main() {
-    let block = Blocks::SIZE / 8 - 2;
+    let block = Capacity {
+        stack: Stack::new(Blocks::default()),
+    }
+    .amount();
     let text = Results {
         machine: vec![
             (
@@ -410,6 +447,7 @@ fn main() {
         } else {
             "release"
         },
+        capacity: block,
         rows: Rows {
             rows: vec![
                 Box::new(Timing {
@@ -435,7 +473,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Difference, Rows, Shell, Text, Work};
+    use super::{Capacity, Difference, Quantity, Rows, Shell, Text, Timing, Work};
+    use eorm::frames::{Frames, Stack};
+    use eorm::pool::{Blocks, Pool};
     use std::time::Duration;
 
     /// Work that takes the same made-up time on every repetition.
@@ -498,6 +538,35 @@ mod tests {
             .text(),
             "x7Ü q",
             "the shell does not give the trimmed output of its command"
+        );
+    }
+
+    #[test]
+    fn timing_reports_the_time_of_one_operation() {
+        assert_eq!(
+            Timing {
+                what: "ü",
+                size: "7 q".to_owned(),
+                ops: 7,
+                work: Fixed { nanos: 23_456_789 },
+            }
+            .text(),
+            "| ü | 7 q | 3350969.86 | 3350969.86–3350969.86 | 7 |",
+            "the timing does not report the time of one operation"
+        );
+    }
+
+    #[test]
+    fn capacity_words_fill_a_block_to_its_end() {
+        let mut stack = Stack::new(Blocks::new(3));
+        let words = Capacity {
+            stack: Stack::new(Blocks::new(5)),
+        }
+        .amount();
+        stack.enter();
+        assert!(
+            (stack.alloc(1, words).addr().get() + words * 8).is_multiple_of(Blocks::SIZE),
+            "the measured capacity does not fill a block to its end"
         );
     }
 }
