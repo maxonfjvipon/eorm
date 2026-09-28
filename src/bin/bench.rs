@@ -489,6 +489,23 @@ mod tests {
         }
     }
 
+    /// Work whose time per repetition changes from run to run, taking
+    /// the made-up times in turn and starting over after the last.
+    struct Turns {
+        nanos: Vec<u64>,
+        turn: usize,
+    }
+
+    impl Work for Turns {
+        fn run(&mut self, reps: usize) -> Duration {
+            self.turn += 1;
+            Duration::from_nanos(
+                self.nanos[(self.turn - 1) % self.nanos.len()]
+                    * u64::try_from(reps).expect("reps fit in u64"),
+            )
+        }
+    }
+
     /// Text that is always the same line.
     struct Line {
         line: &'static str,
@@ -542,17 +559,43 @@ mod tests {
     }
 
     #[test]
-    fn timing_reports_the_time_of_one_operation() {
+    fn timing_reports_the_median_sample() {
         assert_eq!(
             Timing {
                 what: "ü",
-                size: "7 q".to_owned(),
-                ops: 7,
-                work: Fixed { nanos: 23_456_789 },
+                size: "3 q".to_owned(),
+                ops: 1,
+                work: Turns {
+                    nanos: vec![
+                        4_100_000, 3_300_000, 2_900_000, 4_870_013, 2_611_777, 3_901_234,
+                        3_050_505, 4_444_444, 2_777_001, 3_600_017, 4_123_456, 2_950_000,
+                        3_333_331, 4_700_700, 2_690_069, 3_777_777, 4_010_101, 3_150_015,
+                    ],
+                    turn: 0,
+                },
             }
-            .text(),
-            "| ü | 7 q | 3350969.86 | 3350969.86–3350969.86 | 7 |",
-            "the timing does not report the time of one operation"
+            .text()
+            .split(" | ")
+            .nth(2),
+            Some("3600017.00"),
+            "the timing does not report the median of its samples"
+        );
+    }
+
+    #[test]
+    fn timing_divides_a_sample_by_its_repetitions_times_the_operations() {
+        assert_eq!(
+            Timing {
+                what: "ö",
+                size: "11 z".to_owned(),
+                ops: 7,
+                work: Fixed { nanos: 3_141_593 },
+            }
+            .text()
+            .split(" | ")
+            .nth(2),
+            Some("448799.00"),
+            "the timing does not divide a sample by its repetitions times the operations"
         );
     }
 
