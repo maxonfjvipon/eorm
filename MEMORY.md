@@ -3,11 +3,11 @@
 How EO objects live in memory, how they are born, and how their memory is
 given back — without a garbage collector.
 
-Status: design, 2026-09-24. This document is the source of truth for
+Status: design, 2026-09-28. This document is the source of truth for
 memory. Where it disagrees with `DESIGN.md` (pillars P7 and P9) or with
-eojse's README, this document wins. §7, the pool, blocks, regions and
-frames, is built and measured (M0 in `README.md`); the rest is still
-design, and §15 says what to measure before it is built.
+eojse's README, this document wins. §6 and §7, the frames, pool, blocks
+and regions, are built and measured (M0 in `README.md`); the rest is
+still design, and §15 says what to measure before it is built.
 
 ## 1. The idea in one paragraph
 

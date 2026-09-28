@@ -103,9 +103,9 @@ Goal: memory in and out with no objects yet.
   while a younger frame is open; the pool allocates nothing of its own
   (assert on the global allocator).
 - Done when: tests green; `alloc` and `enter`/`leave` measured in ns.
-- Done, 2026-09-28. Carried forward: past 32 blocks a frame costs more
-  per block, likely because block headers share a few cache sets (#34);
-  `leave` costs per block, not per object.
+- Done, 2026-09-28. Carried forward: between 10 and 100 blocks a frame
+  starts to cost more per block, likely because block headers share a few
+  cache sets (#34); `leave` costs per block, not per object.
 
 ### M1 — objects and the machine
 
@@ -227,9 +227,10 @@ Filled in as milestones close.
 3. Copy depth flat — *open*.
 4. Cost — *open*. So far, from `bench/results.md`, made by
    `cargo run --release --bin bench`: an allocation costs about 2.5 ns
-   against eoc's 45, and `leave` gives blocks back at about 2 ns per 4 KB
-   block. That is only the floor of collecting: nothing is copied until
-   M2 or relinked until M3.
+   against eoc's 45, but it hands out bare words, since objects come in
+   M1. `leave` gives blocks back at about 2 ns per 4 KB block. That is
+   only the floor of collecting: nothing is copied until M2 or relinked
+   until M3.
 
 ## 10. Decisions
 
