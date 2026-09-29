@@ -75,7 +75,7 @@ in §9.
 
 | part | file | what |
 |---|---|---|
-| values | `value.rs` | the tagged 64-bit word: float, bool, small payload, pointer, empty (`MEMORY.md` §3) |
+| values | `value.rs` | the tagged 64-bit word: float, bool, small payload, pointer, byte pointer, empty (`MEMORY.md` §3) |
 | pool | `pool.rs` | 4 KB blocks from the OS, intrusive free list (the next pointer lives inside the free block; the pool never allocates for itself) |
 | regions | `region.rs` | per-frame descriptor: two block lists (objects, bytes), bump and limit each; `alloc`, `bytes`, `release` (§7) |
 | frames | `frames.rs` | the frame stack: owns the pool and one region per open frame; `enter`, `leave`, `alloc` into any open frame, `region_of` (§6, §7) |

@@ -58,9 +58,9 @@ A value is one 64-bit word. It is one of:
 | byte pointer | the address of length-prefixed bytes in a byte block (§5) | — |
 | empty | a void slot not yet bound | nothing |
 
-An immediate word (number, bool, small payload) stands for an EO object —
-`Φ.number(φ ↦ Φ.bytes(φ ↦ …))`, `Φ.true`, `Φ.bytes(φ ↦ …)` — but no
-object exists for it. When a program dispatches on it (`x.plus`, `b.eq`),
+An immediate word (number, bool, small payload) or a byte pointer
+stands for an EO object — `Φ.number(φ ↦ Φ.bytes(φ ↦ …))`, `Φ.true`,
+`Φ.bytes(φ ↦ …)` — but no object exists for it. When a program dispatches on it (`x.plus`, `b.eq`),
 the machine **inflates** it: allocates the instance in the current frame
 and puts the word in its φ slot. That instance dies with the frame like
 any other.
