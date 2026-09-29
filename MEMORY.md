@@ -4,9 +4,8 @@ How EO objects live in memory, how they are born, and how their memory is
 given back — without a garbage collector.
 
 Status: design, 2026-09-28. This document is the source of truth for
-memory. Where it disagrees with `DESIGN.md` (pillars P7 and P9) or with
-eojse's README, this document wins. §6 and §7, the frames, pool, blocks
-and regions, are built and measured (M0 in `README.md`); the rest is
+memory in this repository; it answers to no other project's design.
+§6 and §7, the frames, pool, blocks and regions, are built and measured (M0 in `README.md`); the rest is
 still design, and §15 says what to measure before it is built.
 
 ## 1. The idea in one paragraph
@@ -56,17 +55,43 @@ A value is one 64-bit word. It is one of:
 | bool | true or false | nothing |
 | small payload | up to 6 bytes, with their length | nothing |
 | pointer | the address of an object | — |
+| byte pointer | the address of length-prefixed bytes in a byte block (§5) | — |
 | empty | a void slot not yet bound | nothing |
 
-An immediate word (number, bool, small payload) stands for an EO object —
-`Φ.number(φ ↦ Φ.bytes(φ ↦ …))`, `Φ.true`, `Φ.bytes(φ ↦ …)` — but no
-object exists for it. When a program dispatches on it (`x.plus`, `b.eq`),
+An immediate word (number, bool, small payload) or a byte pointer
+stands for an EO object — `Φ.number(φ ↦ Φ.bytes(φ ↦ …))`, `Φ.true`,
+`Φ.bytes(φ ↦ …)` — but no object exists for it. When a program dispatches on it (`x.plus`, `b.eq`),
 the machine **inflates** it: allocates the instance in the current frame
 and puts the word in its φ slot. That instance dies with the frame like
 any other.
 
-The exact bit layout (NaN-boxing, tag bits) is pillar P1's business, not
-this document's.
+The word is NaN-boxed. Its top 16 bits are the tag, its low 48 bits the
+data:
+
+```
+7FF9 … 7FFF   small payload of 0 … 6 bytes; the length is the tag
+              minus 7FF9, the bytes sit little-endian from bit 0 and
+              every unused byte is zero
+FFF9          pointer; the data is the object's address
+FFFA          bool; bit 0 is the value, the rest is zero
+FFFB          empty; the data is zero
+FFFC          byte pointer; the data is the address of the length
+              prefix, so the word never reads as an object
+FFF8, FFFD … FFFF
+              reserved
+anything else number; the word is the f64 itself
+```
+
+Every tag above sits in the quiet-NaN space, and no number word ever
+lands there: every NaN stored into a number word, whether arithmetic
+made it, negation flipped its sign or a program's bytes collapsed into
+it, is rewritten to the one canonical `7FF8 0000 0000 0000` first.
+
+A pointer fits because the platforms this runs on, macOS on arm64 and
+Linux on x86-64, the two that CI builds, hand out user-space addresses
+below 2⁴⁸. Boxing an address whose top 16 bits are not zero fails fast
+instead of dropping them; memory tagging and five-level paging are not
+supported.
 
 ## 4. Objects
 
@@ -291,8 +316,8 @@ long-lived regions and free nothing: every `fibo` instance would end up in
 the root's region. A type widens what the syntax can see (§18).
 
 It does not catch a body with an `if` or a strict `minus` in it, which is
-what a tree builder looks like. That matters once the eraser (P6) makes
-construction strict: a strictly built subtree is a finished structure
+what a tree builder looks like. That matters once an eraser, a pass that
+proves which voids are always demanded, makes construction strict: a strictly built subtree is a finished structure
 when its frame ends, and §9's plain copy would move it again at every
 level above. The relink rule in §9 is what keeps strictness affordable;
 the eraser must not be turned on for builders without it.
@@ -451,7 +476,7 @@ shortcut keeps the branch that hands control back to the machine.
 
 **What a type says nothing about.** How long anything lives: that is the
 frame's business and nobody else's. Whether a thunk may be skipped: a
-datum-typed void still takes a thunk until the eraser (P6) proves the
+datum-typed void still takes a thunk until the eraser proves the
 demand, and the type says only that one word will be left behind when it is
 forced. And the chain of §11 and the copy of §9 for everything the types do
 not reach.
