@@ -55,6 +55,7 @@ A value is one 64-bit word. It is one of:
 | bool | true or false | nothing |
 | small payload | up to 6 bytes, with their length | nothing |
 | pointer | the address of an object | — |
+| byte pointer | the address of length-prefixed bytes in a byte block (§5) | — |
 | empty | a void slot not yet bound | nothing |
 
 An immediate word (number, bool, small payload) stands for an EO object —
@@ -74,15 +75,23 @@ data:
 FFF9          pointer; the data is the object's address
 FFFA          bool; bit 0 is the value, the rest is zero
 FFFB          empty; the data is zero
-FFF8, FFFC … FFFF
+FFFC          byte pointer; the data is the address of the length
+              prefix, so the word never reads as an object
+FFF8, FFFD … FFFF
               reserved
 anything else number; the word is the f64 itself
 ```
 
-Every tag above sits in the quiet-NaN space, which no arithmetic result
-reaches once the machine rewrites every NaN it produces to the one
-canonical `7FF8 0000 0000 0000`. A pointer fits because a
-user-space address fits in 48 bits on every platform this runs on.
+Every tag above sits in the quiet-NaN space, and no number word ever
+lands there: every NaN stored into a number word, whether arithmetic
+made it, negation flipped its sign or a program's bytes collapsed into
+it, is rewritten to the one canonical `7FF8 0000 0000 0000` first.
+
+A pointer fits because the platforms this runs on, macOS on arm64 and
+Linux on x86-64, the two that CI builds, hand out user-space addresses
+below 2⁴⁸. Boxing an address whose top 16 bits are not zero fails fast
+instead of dropping them; memory tagging and five-level paging are not
+supported.
 
 ## 4. Objects
 
