@@ -4,9 +4,8 @@ How EO objects live in memory, how they are born, and how their memory is
 given back — without a garbage collector.
 
 Status: design, 2026-09-28. This document is the source of truth for
-memory. Where it disagrees with `DESIGN.md` (pillars P7 and P9) or with
-eojse's README, this document wins. §6 and §7, the frames, pool, blocks
-and regions, are built and measured (M0 in `README.md`); the rest is
+memory in this repository; it answers to no other project's design.
+§6 and §7, the frames, pool, blocks and regions, are built and measured (M0 in `README.md`); the rest is
 still design, and §15 says what to measure before it is built.
 
 ## 1. The idea in one paragraph
@@ -65,8 +64,25 @@ the machine **inflates** it: allocates the instance in the current frame
 and puts the word in its φ slot. That instance dies with the frame like
 any other.
 
-The exact bit layout (NaN-boxing, tag bits) is pillar P1's business, not
-this document's.
+The word is NaN-boxed. Its top 16 bits are the tag, its low 48 bits the
+data:
+
+```
+7FF9 … 7FFF   small payload of 0 … 6 bytes; the length is the tag
+              minus 7FF9, the bytes sit little-endian from bit 0 and
+              every unused byte is zero
+FFF9          pointer; the data is the object's address
+FFFA          bool; bit 0 is the value, the rest is zero
+FFFB          empty; the data is zero
+FFF8, FFFC … FFFF
+              reserved
+anything else number; the word is the f64 itself
+```
+
+Every tag above sits in the quiet-NaN space, which no arithmetic result
+reaches once the machine rewrites every NaN it produces to the one
+canonical `7FF8 0000 0000 0000`. A pointer fits because a
+user-space address fits in 48 bits on every platform this runs on.
 
 ## 4. Objects
 
@@ -291,8 +307,8 @@ long-lived regions and free nothing: every `fibo` instance would end up in
 the root's region. A type widens what the syntax can see (§18).
 
 It does not catch a body with an `if` or a strict `minus` in it, which is
-what a tree builder looks like. That matters once the eraser (P6) makes
-construction strict: a strictly built subtree is a finished structure
+what a tree builder looks like. That matters once an eraser, a pass that
+proves which voids are always demanded, makes construction strict: a strictly built subtree is a finished structure
 when its frame ends, and §9's plain copy would move it again at every
 level above. The relink rule in §9 is what keeps strictness affordable;
 the eraser must not be turned on for builders without it.
@@ -451,7 +467,7 @@ shortcut keeps the branch that hands control back to the machine.
 
 **What a type says nothing about.** How long anything lives: that is the
 frame's business and nobody else's. Whether a thunk may be skipped: a
-datum-typed void still takes a thunk until the eraser (P6) proves the
+datum-typed void still takes a thunk until the eraser proves the
 demand, and the type says only that one word will be left behind when it is
 forced. And the chain of §11 and the copy of §9 for everything the types do
 not reach.
